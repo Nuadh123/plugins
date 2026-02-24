@@ -84,7 +84,20 @@ class Nextcloud extends Base implements IBackupProvider
                 "type" => "text",
                 "label" => gettext("Directory Name without leading slash, starting from user's root"),
                 "value" => 'OPNsense-Backup'
-            )
+            ),
+            array(
+                "name" => "strategy",
+                "type" => "checkbox",
+                "help" => gettext("Select this one to back up to a file named config-YYYYMMDD instead of syncing contents of /conf/backup"),
+                "label" => gettext("Daily file instead of sync all"),
+            ),
+            array(
+                "name" => "addhostname",
+                "type" => "checkbox",
+                "label" => gettext("Backup to directory named after hostname"),
+                "help" => gettext("Create subdirectory under backupdir for this host"),
+                "value" => null
+            ),
         );
         $nextcloud = new NextcloudSettings();
         foreach ($fields as &$field) {
@@ -138,6 +151,13 @@ class Nextcloud extends Base implements IBackupProvider
             $password = (string)$nextcloud->password;
             $backupdir = (string)$nextcloud->backupdir;
             $crypto_password = (string)$nextcloud->password_encryption;
+            $strategy = (string)$nextcloud->strategy;
+            // Strategy 0 = Sync /conf/backup
+            // Strategy 1 = Copy /conf/config.xml to $backupdir/conf-YYYYMMDD.xml
+
+            if (!$nextcloud->addhostname->isEmpty()) {
+                $backupdir .= "/".gethostname()."/";
+            }
 
             // Check if destination directory exists, create (full path) if not
             try {
@@ -147,12 +167,44 @@ class Nextcloud extends Base implements IBackupProvider
                 return array();
             }
 
+            // Backup strategy 1, sync /conf/config.xml to $backupdir/config-YYYYMMDD.xml
+            if ($strategy) {
+                $confdata = file_get_contents('/conf/config.xml');
+                $mdate = filemtime('/conf/config.xml');
+                $datestring = date('Ymd', $mdate);
+                $target_filename = 'config-' . $datestring . '.xml';
+                // Optionally encrypt
+                if (!empty($crypto_password)) {
+                    $confdata = $this->encrypt($confdata, $crypto_password);
+                }
+                try {
+                    $this->upload_file_content(
+                        $url,
+                        $username,
+                        $password,
+                        $internal_username,
+                        $backupdir,
+                        $target_filename,
+                        $confdata
+                    );
+                    return array($backupdir . '/' . $target_filename);
+                } catch (\Exception $e) {
+                    syslog(LOG_ERR, $e);
+                    return array();
+                }
+            }
+
+            // Default strategy (0), sync /conf/backup/
+
             // Get list of files from local backup system
             $local_files = array();
             $tmp_local_files = scandir('/conf/backup/');
-            // Remove '.' and '..'
+            // Remove '.' and '..', skip directories
             foreach ($tmp_local_files as $tmp_local_file) {
                 if ($tmp_local_file === '.' || $tmp_local_file === '..') {
+                    continue;
+                }
+                if (!is_file("/conf/backup/".$tmp_local_file)) {
                     continue;
                 }
                 $local_files[] = $tmp_local_file;
